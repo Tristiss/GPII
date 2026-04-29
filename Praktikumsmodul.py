@@ -9,6 +9,7 @@ from tinkerforge.bricklet_color_v2 import BrickletColorV2
 from pynput import keyboard
 import numpy as np
 import matplotlib as mpl
+import matplotlib.pyplot as plt
 
 class hardware():
     @staticmethod
@@ -229,3 +230,21 @@ class eval():
         mpl.rcParams.update(mpl.rcParamsDefault)
 
         locale.setlocale(locale.LC_ALL, 'de_DE.UTF-8')
+
+class tests():
+    @staticmethod
+    def pink_noise_test(sign, srate):
+        # Source - https://stackoverflow.com/a/59979450
+        # Posted by navneeth, modified by community. See post 'Timeline' for change history
+        # Retrieved 2026-04-29, License - CC BY-SA 4.0
+
+        # Compute the one-dimensional discrete Fourier Transform.
+        fft_wave = np.fft.fft(sign)
+        # Compute the Discrete Fourier Transform sample frequencies.
+        fft_fre = np.fft.fftfreq(n=sign.size, d=1/srate)
+
+        plt.semilogx(fft_fre, np.abs(fft_wave.real), label="Real part")
+        plt.xlim(3e3,9e3)
+        plt.legend(loc=1)
+        plt.title("FFT in Frequency Domain")
+        plt.show()
