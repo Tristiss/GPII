@@ -25,61 +25,81 @@ k_vals = {
 
 mod_vals = [0.63, 0.8, 1, 1.25, 1.6, 2, 2.5, 3.15, 4, 5, 6.3, 8, 10, 12.5]
 
+alpha_k = [0.085, 0.127, 0.230, 0.233, 0.309, 0.224, 0.173]
+
+beta_k = [0.085, 0.078, 0.065, 0.011, 0.047, 0.095]
+
+# ---------- System Variables ----------
+
+path = r"C:\Programmieren\Praktikum\GPII\Data"
+
+config = {
+    "duration": 10, # duration of the genererated signal in s
+    "dead_time": 1,
+    "srate": 9600, # sample rate in Hz
+    "cal_amp": 1,
+    "cal_freq": 300.0,
+    "n_samples": len(k_vals) * len(mod_vals), # add additional samples if more than STI-14 is performed
+}
+
+config["time"] = np.arange(0, config["duration"], 1 / config["srate"])
+
+
 # ---------- Signal Generation ----------
 
-@numba.njit(fastmath = True, parallel = False)
-def pink_noise_v2(f_c:float, time:np.ndarray):
-    """
-    f_c:float -> center frequency of the octave band
-    time:np.ndarray -> 1d time array
-    
-    credit: Mike X Cohen, implemented from: https://www.youtube.com/watch?v=oKFSvwAbDhU&t=5s
-    """
-
-    low_f:float = f_c / np.sqrt(2)
-    high_f:float = np.sqrt(2) * f_c 
-
-    pnts = len(time)
-
-    frex = np.linspace(low_f, high_f, 500)
-    noise = np.zeros(pnts, dtype = np.float64)
-
-    for i in range(len(frex)):
-        amp = 1/(frex[i]**1)
-        phase = random.random() * 2 * np.pi
-        noise += amp * np.sin(2 * np.pi * frex[i] * time + phase)
-    noise = noise - np.mean(noise)
-    noise = noise / np.max(np.abs(noise))
-    return noise
-
-def am_modulation(sign:np.ndarray, f_m:float, time:np.ndarray):
-    """
-    sign:np.ndarray -> 1d signal array
-    f_m:float -> amplitude modulation frequency
-    time:np.ndarray -> 1d time array
-    """
-    amod = np.sqrt(0.5 * (1 + np.cos(2 * np.pi * f_m * time)))
-
-    return sign * amod
-
-def G_k(sign:np.ndarray, k:int):
-    return sign * 10**(k_vals[k]["L_k"] / 20)
-
-def signal_generation(time:np.ndarray, dead_time, srate:int, cal_amp:float, cal_freq):
+def signal_generation(config:dict):
     """
     start of signal is silence, calibration, silence
     """
-    silence = np.array([0 for i in range(dead_time * srate)])
-    calibration = np.array([cal_amp * np.sin(2 * np.pi * cal_freq * t) for t in range(cal_freq/4 * srate)])
-    
+    @numba.njit(fastmath = True, parallel = True)
+    def pink_noise_v2(f_c:float, time:np.ndarray):
+        """
+        f_c:float -> center frequency of the octave band
+        time:np.ndarray -> 1d time array
+        
+        credit: Mike X Cohen, implemented from: https://www.youtube.com/watch?v=oKFSvwAbDhU&t=5s
+        """
+
+        low_f:float = f_c / np.sqrt(2)
+        high_f:float = np.sqrt(2) * f_c 
+
+        pnts = len(time)
+
+        frex = np.linspace(low_f, high_f, 500)
+        noise = np.zeros(pnts, dtype = np.float64)
+
+        for i in numba.prange(len(frex)):
+            amp = 1/(frex[i]**1)
+            phase = random.random() * 2 * np.pi
+            noise += amp * np.sin(2 * np.pi * frex[i] * time + phase)
+        noise = noise - np.mean(noise)
+        noise = noise / np.max(np.abs(noise))
+        return noise
+
+    def am_modulation(sign:np.ndarray, f_m:float, time:np.ndarray):
+        """
+        sign:np.ndarray -> 1d signal array
+        f_m:float -> amplitude modulation frequency
+        time:np.ndarray -> 1d time array
+        """
+        amod = np.sqrt(0.5 * (1 + np.cos(2 * np.pi * f_m * time)))
+
+        return sign * amod
+
+    def G_k(sign:np.ndarray, k:int):
+        return sign * 10**(k_vals[k]["L_k"] / 20)
+
+    silence = np.array([0 for i in range(config["dead_time"] * config["srate"])])
+    calibration = np.array([config["cal_amp"] * np.sin(2 * np.pi * config["cal_freq"] * t/config["srate"]) for t in range(int(config["srate"]//config["cal_freq"]))])
+
     full_signal = silence.copy()
-    full_signal = calibration.copy()
-    full_signal = silence.copy()
+    full_signal = np.concatenate((full_signal, calibration), axis = 0)
+    full_signal = np.concatenate((full_signal, silence), axis = 0)
 
     for k in tqdm(k_vals):
-        for m in mod_vals[0:1]:
-            noise = pink_noise_v2(k_vals[k]["f_c"], time)
-            sign = am_modulation(noise, m, time)
+        for m in tqdm(mod_vals):
+            noise = pink_noise_v2(k_vals[k]["f_c"], config["time"])
+            sign = am_modulation(noise, m, config["time"])
             sign = G_k(sign, k)
             full_signal = np.concatenate((full_signal, sign), axis = 0)
             full_signal = np.concatenate((full_signal, silence), axis = 0)
@@ -92,17 +112,23 @@ def measurement(sign:np.ndarray): # needs to be implemented
 
 # ---------- Intermediary preparation of the measurement data ----------
 
-def signal_slicing(sign:np.ndarray, srate:int, sample_time:float, dead_time:float, n_samples:int, cal_freq:float):
-    peaks, props = find_peaks(sign, rel_height = 1)
+def signal_slicing(sign:np.ndarray, config:dict):
+    peaks, props = find_peaks(sign)
 
-    sign = sign[peaks[0] + srate * cal_freq / 4:]
+    silence = config["dead_time"] * config["srate"]
+    sample_size = config["duration"] * config["srate"]
+    peak_width = int(3/4 * config["srate"]/config["cal_freq"] + 23)
 
-    sliced_signals = [sign[sample_time * srate * (i-1) + dead_time * srate:sample_time * srate * i + dead_time * srate] for i in range(n_samples)]
+    sign = sign[peaks[0]:]
+
+    sliced_signals = []
+    for i in range(config["n_samples"]):
+        low_index = silence + peak_width + silence * i + sample_size * i
+        high_index = silence + peak_width + silence * i + sample_size * (i+1)
+        sliced_signals.append(sign[low_index : high_index]) 
 
     arr = np.empty(shape = (len(k_vals), len(mod_vals)), dtype=np.ndarray)
-
     counter = 0
-
     for k in range(len(k_vals)):
         for f_m in range(len(mod_vals)):
             arr[k, f_m] = sliced_signals[counter]
@@ -111,42 +137,95 @@ def signal_slicing(sign:np.ndarray, srate:int, sample_time:float, dead_time:floa
 
 # ---------- STI Computation ----------
 
-def envelope_detection(sign:np.ndarray, srate:int):
-    arr = np.empty(shape = (len(k_vals), len(mod_vals)), dtype=np.ndarray)
-    for i_k in range(len(k_vals)):
-        for j_f_m in range(len(mod_vals)):
-            sign[i_k, j_f_m] *= sign[i_k, j_f_m]
-            sos = signal.butter(20, 100, 'low', fs = srate, output = "sos")
-            y, zf = signal.sosfilt(sos, sign[i_k, j_f_m])
-            arr[i_k, j_f_m] = y
-    return arr
+def sti_comp(signs, config:dict):
+    def envelope_detection(sign:np.ndarray, srate:int):
+        arr = np.empty(shape = (len(k_vals), len(mod_vals)), dtype=np.ndarray)
+        for i_k in range(len(k_vals)):
+            for j_f_m in range(len(mod_vals)):
+                sign[i_k, j_f_m] *= sign[i_k, j_f_m]
+                sos = signal.butter(20, 100, 'low', fs = srate, output = "sos")
+                y = signal.sosfilt(sos, sign[i_k, j_f_m])
+                arr[i_k, j_f_m] = y
+        return arr
 
-def modulation_depths(I:np.ndarray, time:np.ndarray):
-    arr = np.empty(shape = (len(k_vals), len(mod_vals)), dtype=np.ndarray)
-    for i_k in range(len(k_vals)):
-        for j_f_m in range(len(mod_vals)):
-            sin_sum = (np.sum(I[i_k, j_f_m] * np.sin(2 * np.pi * mod_vals[j_f_m] * time)))**2
-            cos_sum = (np.sum(I[i_k, j_f_m] * np.cos(2 * np.pi * mod_vals[j_f_m] * time)))**2
-            denom_sum = np.sum(I[i_k, j_f_m])
-            arr[i_k, j_f_m] = 2 * np.sqrt(sin_sum + cos_sum) / denom_sum
-    return arr
+    def modulation_depths(I:np.ndarray, time:np.ndarray):
+        arr = np.empty(shape = (len(k_vals), len(mod_vals)), dtype=np.ndarray)
+        for i_k in range(len(k_vals)):
+            for j_f_m in range(len(mod_vals)):
+                sin_sum = (np.sum(I[i_k, j_f_m] * np.sin(2 * np.pi * mod_vals[j_f_m] * time)))**2
+                cos_sum = (np.sum(I[i_k, j_f_m] * np.cos(2 * np.pi * mod_vals[j_f_m] * time)))**2
+                denom_sum = np.sum(I[i_k, j_f_m])
+                arr[i_k, j_f_m] = 2 * np.sqrt(sin_sum + cos_sum) / denom_sum
+        return arr
+    
+    def limit_mod_ratio(m):
+        return min([m, 1])
+
+    def snr_comp(m):
+        if m == 1:
+            return 15
+        snr = 10 * np.log10(m / (1 - m))
+        match snr:
+            case tmp if snr < -15:
+                return -15
+            case tmp if snr > 15:
+                return 15
+            case _:
+                return snr
+    
+    def transmission_index(snr):
+        return (snr + 15) / 30
+    
+    def modulation_transfer_index(ti):
+        mti = np.empty(len(k_vals))
+        for k in range(len(k_vals)):
+            mti[k] = np.mean(ti[k])
+        return mti
+
+    def sti_last_step(mti):
+        first_term = np.sum([alpha_k[k] * mti[k] for k in range(len(k_vals))])
+        second_term = np.sum([beta_k[k] * np.sqrt(mti[k] * mti[k+1]) for k in range(len(k_vals)-1)])
+        return first_term - second_term
+
+    params = {
+        "sign": [],
+        "I_k_m": [],
+        "mod_dep": []
+    }
+
+    for sign, i in zip(signs, range(len(signs))):
+        params["sign"].append(signal_slicing(sign, config))
+        params["I_k_m"].append(envelope_detection(params["sign"][i], config["srate"]))
+        params["mod_dep"].append(modulation_depths(params["I_k_m"][i], config["time"]))
+
+    m_k_fm = params["mod_dep"][1] / params["mod_dep"][0]
+
+    limit_mod_ratio_vec = np.vectorize(limit_mod_ratio)
+    m_k_fm = limit_mod_ratio_vec(m_k_fm)
+
+    # steps 5 and 6 are still missing because we first need to understand what value to use for I_k
+
+    snr_comp_vec = np.vectorize(snr_comp)
+    snr_k_fm = snr_comp_vec(m_k_fm)
+
+    transmission_index_vec = np.vectorize(transmission_index)
+    ti = transmission_index_vec(snr_k_fm)
+
+    mti = modulation_transfer_index(ti)
+
+    sti = sti_last_step(mti)
+    print(sti)
+
+    return sti, ti
+
+# ---------- Main ----------
 
 def main():
-    path = r"C:\Programmieren\Praktikum\GPII\Data"
-
-    duration:float = 10 # duration of the genererated signal in s
-    dead_time:float = 1
-    srate:int = 44100 # sample rate in Hz
-    cal_amp:float = 1
-    cal_freq:float = 8e03
-
-    n_samples:int = len(k_vals) + len(mod_vals) # add additional samples if more than STI-14 is performed
-
-    time = np.arange(0, duration, 1 / srate)
-
-    sign = signal_generation(time, dead_time, srate, cal_amp, cal_freq)
+    sign = signal_generation(config)
 
     signs = measurement(sign)
+
+    # ---------- Saving the Data in a csv file ----------
 
     # Source - https://stackoverflow.com/questions/1274405/how-to-create-new-folder
     # Posted by mcandre, modified by community. See post 'Timeline' for change history
@@ -160,14 +239,12 @@ def main():
         newpath = path + rf"\Messung_{i}" 
         if not os.path.exists(newpath):
             makedirs(newpath)
-            pd.DataFrame({"time": time, "input": sign, "ref": signs[0], "mes": signs[1]}).to_csv(newpath + r"\Messdaten.csv", sep = ";")
+            pd.DataFrame({"input": sign, "ref": signs[0], "mes": signs[1]}).to_csv(newpath + r"\Messdaten.csv", sep = ";")
             break
 
-    for sign in signs:
-        sign = signal_slicing(sign, srate, duration, dead_time, n_samples, cal_freq)
-        I_k_m = envelope_detection(sign, srate)
-        mod_dep = modulation_depths(I_k_m, time)
-
+    sti, ti = sti_comp(signs, config)
+    plt.imshow(ti)
+    plt.show()
 
 if __name__ == "__main__":
     main()
